@@ -19,6 +19,8 @@ import engine as smbypass
 
 app = Flask(__name__)
 _lock = threading.Lock()
+JOBS = {}
+
 TOKEN = os.environ.get("SMBY_TOKEN", "").strip()
 START = time.time()
 STATS = {"ok": 0, "fail": 0}
@@ -28,6 +30,32 @@ def _auth_ok():
     if not TOKEN:
         return True
     return request.headers.get("X-Token", "") == TOKEN
+
+
+def _spawn(url):
+    import uuid
+    jid = uuid.uuid4().hex[:12]
+    JOBS[jid] = {"status": "queued", "url": url, "result": None, "started": time.time()}
+
+    def work():
+        JOBS[jid]["status"] = "running"
+        JOBS[jid]["result"] = _run(url)
+        JOBS[jid]["status"] = "done"
+
+    threading.Thread(target=work, daemon=True).start()
+    return jid
+
+
+@app.get("/job/<jid>")
+def job(jid):
+    if not _auth_ok():
+        return jsonify(ok=False, error="unauthorized"), 401
+    j = JOBS.get(jid)
+    if not j:
+        return jsonify(ok=False, error="job tidak ada"), 404
+    if j["status"] != "done":
+        return jsonify(ok=True, status=j["status"], elapsed=round(time.time() - j["started"], 1))
+    return jsonify(ok=True, status="done", result=j["result"], elapsed=round(time.time() - j["started"], 1))
 
 
 def _run(url):
@@ -56,7 +84,9 @@ def bypass_get():
     url = request.args.get("url", "").strip()
     if not url:
         return jsonify(ok=False, error="param url kosong"), 400
-    return jsonify(_run(url))
+    if request.args.get("wait") == "1":
+        return jsonify(_run(url))
+    return jsonify(ok=True, job=_spawn(url))
 
 
 @app.post("/bypass")
@@ -67,7 +97,9 @@ def bypass_post():
     url = (body.get("url") or request.form.get("url") or "").strip()
     if not url:
         return jsonify(ok=False, error="field url kosong"), 400
-    return jsonify(_run(url))
+    if request.args.get("wait") == "1":
+        return jsonify(_run(url))
+    return jsonify(ok=True, job=_spawn(url))
 
 
 if __name__ == "__main__":
